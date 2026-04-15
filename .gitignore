@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.local
+.DS_Store
+.streamlit/secrets.toml
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+reports/
