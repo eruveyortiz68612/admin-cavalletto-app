@@ -1376,6 +1376,46 @@ def eliminar_proceso(**kw):
         return _err(e)
 
 
+def exportar_proceso_documento(**kw):
+    """Exporta proceso como Word (.docx), Excel (.xlsx) o PDF."""
+    try:
+        _init_procesos_table()
+        pid = kw.get("proceso_id")
+        formato = kw.get("formato", "docx").lower()
+        if not pid:
+            return _err("proceso_id es obligatorio")
+        if formato not in ("docx", "xlsx", "pdf"):
+            return _err("formato debe ser: docx, xlsx o pdf")
+
+        proc = query("SELECT * FROM procesos_administrativos WHERE id = ?",
+                     (pid,), fetchone=True)
+        if not proc:
+            return _err(f"Proceso ID {pid} no encontrado")
+
+        # Parse JSON fields
+        proc["pasos"] = _json.loads(proc["pasos"]) if proc["pasos"] else []
+        proc["kpis"] = _json.loads(proc["kpis"]) if proc["kpis"] else []
+        proc["excepciones"] = _json.loads(proc["excepciones"]) if proc["excepciones"] else []
+        proc["automatizaciones"] = _json.loads(proc["automatizaciones"]) if proc["automatizaciones"] else []
+
+        import doc_generator
+        result = doc_generator.generate(f"proceso_{formato}", proceso=proc)
+        if not result:
+            return _err(f"Error generando {formato}")
+
+        data_bytes, filename, mime = result
+        import base64
+        return {
+            "tipo": "reporte",
+            "nombre": filename,
+            "bytes": base64.b64encode(data_bytes).decode(),
+            "mime": mime,
+            "mensaje": f"Proceso '{proc['nombre']}' exportado como {formato.upper()}"
+        }
+    except Exception as e:
+        return _err(e)
+
+
 def exportar_proceso_md(**kw):
     try:
         _init_procesos_table()
@@ -1501,6 +1541,7 @@ TOOL_HANDLERS = {
     "activar_proceso": activar_proceso,
     "eliminar_proceso": eliminar_proceso,
     "exportar_proceso_md": exportar_proceso_md,
+    "exportar_proceso_documento": exportar_proceso_documento,
 }
 
 
@@ -2140,6 +2181,26 @@ ANTHROPIC_TOOLS = [
                 "proceso_id": {"type": "integer"},
             },
             "required": ["proceso_id"],
+        },
+    },
+    {
+        "name": "exportar_proceso_documento",
+        "description": (
+            "Genera un documento descargable del proceso en formato Word (.docx), "
+            "Excel (.xlsx) o PDF. El Word es ideal para compartir y editar, el Excel "
+            "para tabular pasos y KPIs, el PDF para impresion formal."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "proceso_id": {"type": "integer", "description": "ID del proceso a exportar."},
+                "formato": {
+                    "type": "string",
+                    "description": "Formato del documento: docx (Word), xlsx (Excel) o pdf.",
+                    "enum": ["docx", "xlsx", "pdf"],
+                },
+            },
+            "required": ["proceso_id", "formato"],
         },
     },
 ]
