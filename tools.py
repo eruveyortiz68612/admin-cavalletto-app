@@ -1186,6 +1186,259 @@ def rechazar_factura(**kw):
 
 
 # ---------------------------------------------------------------------------
+# Procesos Administrativos
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+
+def _init_procesos_table():
+    """Crea la tabla de procesos si no existe."""
+    execute("""
+        CREATE TABLE IF NOT EXISTS procesos_administrativos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL,
+            objetivo TEXT NOT NULL,
+            area TEXT NOT NULL,
+            frecuencia TEXT NOT NULL,
+            trigger_inicio TEXT,
+            responsable_principal TEXT,
+            pasos TEXT NOT NULL,
+            kpis TEXT,
+            excepciones TEXT,
+            automatizaciones TEXT,
+            documentos_asociados TEXT,
+            estatus TEXT DEFAULT 'borrador',
+            version INTEGER DEFAULT 1,
+            fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            notas TEXT
+        )
+    """)
+
+
+def crear_proceso(**kw):
+    try:
+        _init_procesos_table()
+        nombre = kw.get("nombre", "").strip()
+        objetivo = kw.get("objetivo", "").strip()
+        area = kw.get("area", "").strip()
+        frecuencia = kw.get("frecuencia", "").strip()
+        if not all([nombre, objetivo, area, frecuencia]):
+            return _err("nombre, objetivo, area y frecuencia son obligatorios")
+
+        pasos = kw.get("pasos", [])
+        if isinstance(pasos, str):
+            pasos = _json.loads(pasos)
+
+        kpis = kw.get("kpis", [])
+        if isinstance(kpis, str):
+            kpis = _json.loads(kpis)
+
+        excepciones = kw.get("excepciones", [])
+        if isinstance(excepciones, str):
+            excepciones = _json.loads(excepciones)
+
+        automatizaciones = kw.get("automatizaciones", [])
+        if isinstance(automatizaciones, str):
+            automatizaciones = _json.loads(automatizaciones)
+
+        pid = execute(
+            """INSERT INTO procesos_administrativos
+               (nombre, objetivo, area, frecuencia, trigger_inicio,
+                responsable_principal, pasos, kpis, excepciones,
+                automatizaciones, notas)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (nombre, objetivo, area, frecuencia,
+             kw.get("trigger_inicio", ""),
+             kw.get("responsable", ""),
+             _json.dumps(pasos, ensure_ascii=False),
+             _json.dumps(kpis, ensure_ascii=False),
+             _json.dumps(excepciones, ensure_ascii=False),
+             _json.dumps(automatizaciones, ensure_ascii=False),
+             kw.get("notas", "")),
+        )
+        return _ok(proceso_id=pid, mensaje=f"Proceso '{nombre}' creado (ID {pid})", pasos_count=len(pasos))
+    except Exception as e:
+        return _err(e)
+
+
+def listar_procesos(**kw):
+    try:
+        _init_procesos_table()
+        sql = """SELECT id, nombre, area, frecuencia, responsable_principal,
+                        estatus, version, fecha_creacion
+                 FROM procesos_administrativos WHERE estatus != 'obsoleto'"""
+        params = []
+        if kw.get("area"):
+            sql += " AND area = ?"
+            params.append(kw["area"])
+        if kw.get("estatus"):
+            sql += " AND estatus = ?"
+            params.append(kw["estatus"])
+        sql += " ORDER BY area, nombre"
+        rows = query(sql, params)
+        return _ok(procesos=rows, total=len(rows))
+    except Exception as e:
+        return _err(e)
+
+
+def ver_proceso(**kw):
+    try:
+        _init_procesos_table()
+        pid = kw.get("proceso_id")
+        if not pid:
+            return _err("proceso_id es obligatorio")
+        proc = query("SELECT * FROM procesos_administrativos WHERE id = ?",
+                     (pid,), fetchone=True)
+        if not proc:
+            return _err(f"Proceso ID {pid} no encontrado")
+        proc["pasos"] = _json.loads(proc["pasos"]) if proc["pasos"] else []
+        proc["kpis"] = _json.loads(proc["kpis"]) if proc["kpis"] else []
+        proc["excepciones"] = _json.loads(proc["excepciones"]) if proc["excepciones"] else []
+        proc["automatizaciones"] = _json.loads(proc["automatizaciones"]) if proc["automatizaciones"] else []
+        return _ok(proceso=proc)
+    except Exception as e:
+        return _err(e)
+
+
+def editar_proceso(**kw):
+    try:
+        _init_procesos_table()
+        pid = kw.get("proceso_id")
+        if not pid:
+            return _err("proceso_id es obligatorio")
+        proc = query("SELECT id, version FROM procesos_administrativos WHERE id = ?",
+                     (pid,), fetchone=True)
+        if not proc:
+            return _err(f"Proceso ID {pid} no encontrado")
+
+        updates = []
+        params = []
+        for field in ["nombre", "objetivo", "area", "frecuencia", "trigger_inicio", "notas", "estatus"]:
+            if kw.get(field) is not None:
+                db_field = "responsable_principal" if field == "responsable" else field
+                updates.append(f"{db_field} = ?")
+                params.append(kw[field])
+        if kw.get("responsable") is not None:
+            updates.append("responsable_principal = ?")
+            params.append(kw["responsable"])
+        for json_field in ["pasos", "kpis", "excepciones", "automatizaciones"]:
+            if kw.get(json_field) is not None:
+                val = kw[json_field]
+                if isinstance(val, (list, dict)):
+                    val = _json.dumps(val, ensure_ascii=False)
+                updates.append(f"{json_field} = ?")
+                params.append(val)
+
+        if not updates:
+            return _err("No se especificaron campos a editar")
+
+        updates.append("version = version + 1")
+        updates.append("fecha_actualizacion = CURRENT_TIMESTAMP")
+        params.append(pid)
+        execute(f"UPDATE procesos_administrativos SET {', '.join(updates)} WHERE id = ?", params)
+        return _ok(proceso_id=pid, mensaje=f"Proceso ID {pid} actualizado (v{proc['version'] + 1})")
+    except Exception as e:
+        return _err(e)
+
+
+def activar_proceso(**kw):
+    try:
+        _init_procesos_table()
+        pid = kw.get("proceso_id")
+        estatus = kw.get("estatus", "activo")
+        if not pid:
+            return _err("proceso_id es obligatorio")
+        if estatus not in ("borrador", "activo", "pausado", "obsoleto"):
+            return _err("estatus debe ser: borrador, activo, pausado u obsoleto")
+        execute(
+            "UPDATE procesos_administrativos SET estatus = ?, fecha_actualizacion = CURRENT_TIMESTAMP WHERE id = ?",
+            (estatus, pid),
+        )
+        return _ok(proceso_id=pid, mensaje=f"Proceso ID {pid} marcado como '{estatus}'")
+    except Exception as e:
+        return _err(e)
+
+
+def eliminar_proceso(**kw):
+    try:
+        _init_procesos_table()
+        pid = kw.get("proceso_id")
+        if not pid:
+            return _err("proceso_id es obligatorio")
+        execute(
+            "UPDATE procesos_administrativos SET estatus = 'obsoleto', fecha_actualizacion = CURRENT_TIMESTAMP WHERE id = ?",
+            (pid,),
+        )
+        return _ok(proceso_id=pid, mensaje=f"Proceso ID {pid} eliminado (marcado obsoleto)")
+    except Exception as e:
+        return _err(e)
+
+
+def exportar_proceso_md(**kw):
+    try:
+        _init_procesos_table()
+        pid = kw.get("proceso_id")
+        if not pid:
+            return _err("proceso_id es obligatorio")
+        proc = query("SELECT * FROM procesos_administrativos WHERE id = ?",
+                     (pid,), fetchone=True)
+        if not proc:
+            return _err(f"Proceso ID {pid} no encontrado")
+
+        pasos = _json.loads(proc["pasos"]) if proc["pasos"] else []
+        kpis = _json.loads(proc["kpis"]) if proc["kpis"] else []
+        excepciones = _json.loads(proc["excepciones"]) if proc["excepciones"] else []
+
+        md = [f"# {proc['nombre']}", ""]
+        md.append(f"**Area:** {proc['area']}  ")
+        md.append(f"**Frecuencia:** {proc['frecuencia']}  ")
+        md.append(f"**Responsable:** {proc['responsable_principal'] or 'Por asignar'}  ")
+        md.append(f"**Estatus:** {proc['estatus']}  ")
+        md.append(f"**Version:** {proc['version']}")
+        md.extend(["", "## Objetivo", "", proc["objetivo"], ""])
+
+        if proc.get("trigger_inicio"):
+            md.extend(["## Trigger de inicio", "", proc["trigger_inicio"], ""])
+
+        if pasos:
+            md.extend(["## Pasos del proceso", ""])
+            for i, p in enumerate(pasos, 1):
+                accion = p.get("accion", p.get("nombre", "Sin nombre"))
+                md.append(f"### Paso {i}: {accion}")
+                md.append("")
+                for k, label in [("responsable", "Responsable"), ("tiempo_estimado", "Tiempo estimado"),
+                                 ("herramienta", "Herramienta"), ("entregable", "Entregable"),
+                                 ("criterio_exito", "Criterio de exito")]:
+                    if p.get(k):
+                        md.append(f"- **{label}:** {p[k]}")
+                md.append("")
+
+        if kpis:
+            md.extend(["## KPIs", "", "| Metrica | Meta | Medicion |", "|---|---|---|"])
+            for k in kpis:
+                if isinstance(k, dict):
+                    md.append(f"| {k.get('nombre', '-')} | {k.get('meta', '-')} | {k.get('medicion', '-')} |")
+                else:
+                    md.append(f"| {k} | - | - |")
+            md.append("")
+
+        if excepciones:
+            md.extend(["## Excepciones", ""])
+            for e in excepciones:
+                if isinstance(e, dict):
+                    md.append(f"- **Si** {e.get('condicion', '-')} **entonces** {e.get('accion', '-')}")
+                else:
+                    md.append(f"- {e}")
+            md.append("")
+
+        return _ok(tipo="documento", contenido="\n".join(md), nombre=f"proceso_{proc['nombre'].lower().replace(' ', '_')}.md")
+    except Exception as e:
+        return _err(e)
+
+
+# ---------------------------------------------------------------------------
 # TOOL_HANDLERS registry
 # ---------------------------------------------------------------------------
 
@@ -1240,6 +1493,14 @@ TOOL_HANDLERS = {
     "obtener_factura": obtener_factura,
     "procesar_factura": procesar_factura,
     "rechazar_factura": rechazar_factura,
+    # Procesos Administrativos
+    "crear_proceso": crear_proceso,
+    "listar_procesos": listar_procesos,
+    "ver_proceso": ver_proceso,
+    "editar_proceso": editar_proceso,
+    "activar_proceso": activar_proceso,
+    "eliminar_proceso": eliminar_proceso,
+    "exportar_proceso_md": exportar_proceso_md,
 }
 
 
@@ -1721,6 +1982,164 @@ ANTHROPIC_TOOLS = [
                 "motivo": {"type": "string", "description": "Razon del rechazo."},
             },
             "required": ["factura_id", "motivo"],
+        },
+    },
+    # --- Procesos Administrativos ---
+    {
+        "name": "crear_proceso",
+        "description": (
+            "Crea un nuevo proceso administrativo documentado. Usa despues de "
+            "guiar al usuario paso a paso en el diseno del proceso. Guarda "
+            "nombre, objetivo, area, frecuencia, pasos detallados, KPIs y excepciones."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre del proceso (ej. 'Cobranza Mensual', 'Inscripcion Nuevo Alumno')."},
+                "objetivo": {"type": "string", "description": "Que resultado espera lograr este proceso."},
+                "area": {
+                    "type": "string",
+                    "description": "Area del kinder: cobranza, gastos, inventario, nomina, inscripciones, comunicacion, operaciones.",
+                },
+                "frecuencia": {
+                    "type": "string",
+                    "description": "Con que frecuencia se ejecuta: diaria, semanal, quincenal, mensual, bimestral, semestral, anual, por-evento.",
+                },
+                "trigger_inicio": {"type": "string", "description": "Evento que dispara el proceso (ej. 'Dia 25 del mes anterior', 'Llega solicitud de inscripcion')."},
+                "responsable": {"type": "string", "description": "Persona principal responsable del proceso."},
+                "pasos": {
+                    "type": "array",
+                    "description": "Lista ordenada de pasos del proceso.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "accion": {"type": "string", "description": "Que se hace en este paso."},
+                            "responsable": {"type": "string", "description": "Quien ejecuta este paso."},
+                            "tiempo_estimado": {"type": "string", "description": "Cuanto tarda (ej. '30 min', '1 dia')."},
+                            "herramienta": {"type": "string", "description": "Sistema o herramienta usada (ej. 'WhatsApp', 'agente-administrativo', 'Excel')."},
+                            "entregable": {"type": "string", "description": "Que produce este paso."},
+                            "criterio_exito": {"type": "string", "description": "Como sabes que se hizo bien."},
+                        },
+                        "required": ["accion"],
+                    },
+                },
+                "kpis": {
+                    "type": "array",
+                    "description": "Metricas para evaluar si el proceso funciona.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "nombre": {"type": "string"},
+                            "meta": {"type": "string"},
+                            "medicion": {"type": "string"},
+                        },
+                    },
+                },
+                "excepciones": {
+                    "type": "array",
+                    "description": "Reglas especiales o manejo de casos atipicos.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "condicion": {"type": "string", "description": "Cuando aplica la excepcion."},
+                            "accion": {"type": "string", "description": "Que hacer en ese caso."},
+                        },
+                    },
+                },
+                "automatizaciones": {
+                    "type": "array",
+                    "description": "Scripts del agente vinculados a pasos del proceso.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "script": {"type": "string"},
+                            "comando": {"type": "string"},
+                        },
+                    },
+                },
+                "notas": {"type": "string"},
+            },
+            "required": ["nombre", "objetivo", "area", "frecuencia", "pasos"],
+        },
+    },
+    {
+        "name": "listar_procesos",
+        "description": "Lista los procesos administrativos registrados. Filtra opcionalmente por area o estatus.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "area": {"type": "string", "description": "Filtrar por area (cobranza, gastos, inventario, nomina, inscripciones, comunicacion, operaciones)."},
+                "estatus": {"type": "string", "description": "Filtrar por estatus (borrador, activo, pausado)."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "ver_proceso",
+        "description": "Muestra el detalle completo de un proceso: pasos, KPIs, excepciones, automatizaciones.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "proceso_id": {"type": "integer", "description": "ID del proceso a consultar."},
+            },
+            "required": ["proceso_id"],
+        },
+    },
+    {
+        "name": "editar_proceso",
+        "description": "Edita campos de un proceso existente. Solo enviar los campos que cambian.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "proceso_id": {"type": "integer", "description": "ID del proceso a editar."},
+                "nombre": {"type": "string"},
+                "objetivo": {"type": "string"},
+                "area": {"type": "string"},
+                "frecuencia": {"type": "string"},
+                "trigger_inicio": {"type": "string"},
+                "responsable": {"type": "string"},
+                "pasos": {"type": "array", "items": {"type": "object"}},
+                "kpis": {"type": "array", "items": {"type": "object"}},
+                "excepciones": {"type": "array", "items": {"type": "object"}},
+                "automatizaciones": {"type": "array", "items": {"type": "object"}},
+                "notas": {"type": "string"},
+                "estatus": {"type": "string"},
+            },
+            "required": ["proceso_id"],
+        },
+    },
+    {
+        "name": "activar_proceso",
+        "description": "Cambia el estatus de un proceso (borrador, activo, pausado, obsoleto).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "proceso_id": {"type": "integer"},
+                "estatus": {"type": "string", "description": "Nuevo estatus: borrador, activo, pausado, obsoleto."},
+            },
+            "required": ["proceso_id", "estatus"],
+        },
+    },
+    {
+        "name": "eliminar_proceso",
+        "description": "Marca un proceso como obsoleto (eliminacion suave). Confirmar con el usuario antes.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "proceso_id": {"type": "integer"},
+            },
+            "required": ["proceso_id"],
+        },
+    },
+    {
+        "name": "exportar_proceso_md",
+        "description": "Exporta un proceso como documento Markdown estructurado para compartir con el equipo.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "proceso_id": {"type": "integer"},
+            },
+            "required": ["proceso_id"],
         },
     },
 ]
